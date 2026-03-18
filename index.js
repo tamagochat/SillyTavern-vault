@@ -1,4 +1,10 @@
-import { registerStorageProvider } from '../../src/storage-provider.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+// Resolve relative to SillyTavern's server directory (process.cwd), not this file's real path,
+// so the import works whether the plugin is symlinked or copied into the plugins folder.
+const storageProviderPath = path.join(process.cwd(), 'src', 'storage-provider.js');
+const { registerStorageProvider } = await import(pathToFileURL(storageProviderPath).href);
 import { createProvider } from './provider.js';
 import { initDb } from './db.js';
 import { initS3 } from './s3.js';

@@ -97,6 +97,36 @@ export function createProvider(db, s3) {
             }));
         },
 
+        // ─── Avatars ──────────────────────────────────────────────
+
+        async listAvatars(userHandle) {
+            const prefix = `${userHandle}/User Avatars/`;
+            const keys = await s3.list(prefix);
+            return keys.map(key => path.basename(key));
+        },
+
+        // ─── Backgrounds ─────────────────────────────────────────
+
+        async listBackgrounds(userHandle) {
+            const prefix = `${userHandle}/backgrounds/`;
+            const keys = await s3.list(prefix);
+            return keys.map(key => path.basename(key));
+        },
+
+        async renameBackground(userHandle, oldName, newName) {
+            const oldKey = `${userHandle}/backgrounds/${oldName}`;
+            const newKey = `${userHandle}/backgrounds/${newName}`;
+            const obj = await s3.get(oldKey);
+            const chunks = [];
+            for await (const chunk of obj.Body) {
+                chunks.push(chunk);
+            }
+            const buffer = Buffer.concat(chunks);
+            const contentType = obj.ContentType || 'application/octet-stream';
+            await s3.put(newKey, buffer, contentType);
+            await s3.del(oldKey);
+        },
+
         // ─── Files (images, avatars, etc.) ───────────────────────
 
         async saveFile(userHandle, relativePath, buffer) {
@@ -118,6 +148,24 @@ export function createProvider(db, s3) {
             const prefix = `${userHandle}/user/images/${directory}/`;
             const keys = await s3.list(prefix);
             return keys.map(key => path.basename(key));
+        },
+
+        async readFile(userHandle, relativePath) {
+            const cleanPath = relativePath.replace(/^\/+/, '');
+            const s3Key = `${userHandle}/${cleanPath}`;
+            try {
+                const obj = await s3.get(s3Key);
+                const chunks = [];
+                for await (const chunk of obj.Body) {
+                    chunks.push(chunk);
+                }
+                return Buffer.concat(chunks);
+            } catch (err) {
+                if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+                    return null;
+                }
+                throw err;
+            }
         },
 
         async serveFile(userHandle, relativePath, res) {
