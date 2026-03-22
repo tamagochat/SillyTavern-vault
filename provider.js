@@ -2,6 +2,18 @@ import path from 'node:path';
 import mime from 'mime-types';
 
 /**
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+/**
  * Creates the storage provider implementation backed by Postgres + S3.
  * @param {import('pg').Pool} db
  * @param {import('./s3.js').S3Handle} s3
@@ -47,25 +59,36 @@ export function createProvider(db, s3) {
         async listChats(userHandle, characterName) {
             let query, params;
             if (characterName) {
-                query = `SELECT file_name, updated_at,
-                         (SELECT count(*) FROM regexp_split_to_table(content, E'\\n') WHERE length(trim(regexp_split_to_table)) > 0) as message_count
+                query = `SELECT file_name, updated_at, length(content) as content_length,
+                         (SELECT count(*) FROM regexp_split_to_table(content, E'\\n') WHERE length(trim(regexp_split_to_table)) > 0) as message_count,
+                         (SELECT x FROM unnest(regexp_split_to_array(content, E'\\n')) WITH ORDINALITY AS t(x, ord) WHERE length(trim(x)) > 0 ORDER BY ord DESC LIMIT 1) as last_line
                          FROM chats WHERE user_handle = $1 AND character_name = $2
                          ORDER BY updated_at DESC`;
                 params = [userHandle, characterName];
             } else {
-                query = `SELECT file_name, character_name, updated_at,
-                         (SELECT count(*) FROM regexp_split_to_table(content, E'\\n') WHERE length(trim(regexp_split_to_table)) > 0) as message_count
+                query = `SELECT file_name, character_name, updated_at, length(content) as content_length,
+                         (SELECT count(*) FROM regexp_split_to_table(content, E'\\n') WHERE length(trim(regexp_split_to_table)) > 0) as message_count,
+                         (SELECT x FROM unnest(regexp_split_to_array(content, E'\\n')) WITH ORDINALITY AS t(x, ord) WHERE length(trim(x)) > 0 ORDER BY ord DESC LIMIT 1) as last_line
                          FROM chats WHERE user_handle = $1
                          ORDER BY updated_at DESC`;
                 params = [userHandle];
             }
             const result = await db.query(query, params);
-            return result.rows.map(row => ({
-                file_name: row.file_name,
-                character_name: row.character_name,
-                lastModified: row.updated_at,
-                messageCount: parseInt(row.message_count, 10),
-            }));
+            return result.rows.map(row => {
+                let previewMessage = '';
+                try {
+                    const lastLine = JSON.parse(row.last_line || '{}');
+                    previewMessage = lastLine.mes || '';
+                } catch { /* ignore parse errors */ }
+                return {
+                    file_name: row.file_name,
+                    character_name: row.character_name,
+                    file_size: formatBytes(parseInt(row.content_length, 10) || 0),
+                    message_count: Math.max(0, parseInt(row.message_count, 10) - 1),
+                    last_mes: row.updated_at,
+                    preview_message: previewMessage.substring(0, 400),
+                };
+            });
         },
 
         async renameChat(userHandle, characterName, oldName, newName) {
@@ -76,25 +99,108 @@ export function createProvider(db, s3) {
             );
         },
 
-        async searchChats(userHandle, query) {
+        async searchChats(userHandle, query, characterName) {
             if (!query || query.trim().length === 0) {
-                return [];
+                return this.listChats(userHandle, characterName);
             }
 
             const tsQuery = query.trim().split(/\s+/).join(' & ');
-            const result = await db.query(
-                `SELECT file_name, character_name, updated_at
-                 FROM chats
-                 WHERE user_handle = $1 AND to_tsvector('simple', content) @@ to_tsquery('simple', $2)
-                 ORDER BY updated_at DESC`,
-                [userHandle, tsQuery],
-            );
+            let sql = `SELECT file_name, character_name, updated_at, length(content) as content_length,
+                        (SELECT count(*) FROM regexp_split_to_table(content, E'\\n') WHERE length(trim(regexp_split_to_table)) > 0) as message_count,
+                        (SELECT x FROM unnest(regexp_split_to_array(content, E'\\n')) WITH ORDINALITY AS t(x, ord) WHERE length(trim(x)) > 0 ORDER BY ord DESC LIMIT 1) as last_line
+                        FROM chats
+                        WHERE user_handle = $1 AND to_tsvector('simple', content) @@ to_tsquery('simple', $2)`;
+            const params = [userHandle, tsQuery];
 
-            return result.rows.map(row => ({
-                file_name: row.file_name,
-                character_name: row.character_name,
-                lastModified: row.updated_at,
-            }));
+            if (characterName) {
+                sql += ' AND character_name = $3';
+                params.push(characterName);
+            }
+            sql += ' ORDER BY updated_at DESC';
+
+            const result = await db.query(sql, params);
+            return result.rows.map(row => {
+                let previewMessage = '';
+                try {
+                    const lastLine = JSON.parse(row.last_line || '{}');
+                    previewMessage = lastLine.mes || '';
+                } catch { /* ignore parse errors */ }
+                return {
+                    file_name: row.file_name,
+                    character_name: row.character_name,
+                    file_size: formatBytes(parseInt(row.content_length, 10) || 0),
+                    message_count: Math.max(0, parseInt(row.message_count, 10) - 1),
+                    last_mes: row.updated_at,
+                    preview_message: previewMessage.substring(0, 400),
+                };
+            });
+        },
+
+        // ─── Character-level operations ─────────────────────────
+
+        async renameCharacterChats(userHandle, oldCharName, newCharName) {
+            await db.query(
+                `UPDATE chats SET character_name = $3, updated_at = NOW()
+                 WHERE user_handle = $1 AND character_name = $2`,
+                [userHandle, oldCharName, newCharName],
+            );
+        },
+
+        async deleteCharacterChats(userHandle, characterName) {
+            await db.query(
+                'DELETE FROM chats WHERE user_handle = $1 AND character_name = $2',
+                [userHandle, characterName],
+            );
+        },
+
+        // ─── Groups (stored in S3) ──────────────────────────────
+
+        async saveGroup(userHandle, groupId, jsonString) {
+            const s3Key = `${userHandle}/groups/${groupId}.json`;
+            await s3.put(s3Key, Buffer.from(jsonString, 'utf8'), 'application/json');
+        },
+
+        async readGroup(userHandle, groupId) {
+            const s3Key = `${userHandle}/groups/${groupId}.json`;
+            try {
+                const obj = await s3.get(s3Key);
+                const chunks = [];
+                for await (const chunk of obj.Body) {
+                    chunks.push(chunk);
+                }
+                return Buffer.concat(chunks).toString('utf8');
+            } catch (err) {
+                if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+                    return null;
+                }
+                throw err;
+            }
+        },
+
+        async deleteGroup(userHandle, groupId) {
+            const s3Key = `${userHandle}/groups/${groupId}.json`;
+            await s3.del(s3Key);
+        },
+
+        async listGroups(userHandle) {
+            const prefix = `${userHandle}/groups/`;
+            const keys = await s3.list(prefix);
+            const groups = [];
+            for (const key of keys) {
+                if (!key.endsWith('.json')) continue;
+                try {
+                    const obj = await s3.get(key);
+                    const chunks = [];
+                    for await (const chunk of obj.Body) {
+                        chunks.push(chunk);
+                    }
+                    const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                    groups.push(data);
+                } catch (err) {
+                    console.warn(`[StorageProvider] Failed to read group ${key}:`, err.message);
+                }
+            }
+            return groups;
         },
 
         // ─── Avatars ──────────────────────────────────────────────
