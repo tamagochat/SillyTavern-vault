@@ -20,10 +20,10 @@ SillyTavern-vault moves storage to PostgreSQL + S3 so your data lives independen
 
 ## What it does
 
-| Layer | Backend       | What's stored                                     |
-| ----- | ------------- | ------------------------------------------------- |
-| Chat  | PostgreSQL    | Chat history (JSONL), full-text searchable        |
-| Media | S3 (MinIO/R2) | Images, avatars, backgrounds, audio, video, files |
+| Layer | Backend       | What's stored                                              |
+| ----- | ------------- | ---------------------------------------------------------- |
+| Chat  | PostgreSQL    | Chat history (JSONL), full-text searchable                 |
+| Media | S3 (MinIO/R2) | Images, avatars, backgrounds, group definitions, files     |
 
 When the plugin is active, SillyTavern reads/writes to these backends instead of the local filesystem. When disabled, everything falls through to the default filesystem storage — zero behavior change.
 
@@ -56,6 +56,13 @@ The image from the conversation is stored in S3 (viewed via MinIO console):
 | ------------------------ | ------------------------------------------------------------ |
 | SillyTavern (filesystem) | `data/{user_handle}/user/images/{character_name}/{filename}` |
 | SillyTavern-vault        | `{user_handle}/user/images/{character_name}/{filename}`      |
+
+**Groups (S3)**
+
+| Mode                     | Key                                                       |
+| ------------------------ | --------------------------------------------------------- |
+| SillyTavern (filesystem) | `data/{user_handle}/groups/{group_id}.json`               |
+| SillyTavern-vault        | `{user_handle}/groups/{group_id}.json`                    |
 
 **Other SillyTavern paths (reference)**
 
@@ -247,6 +254,7 @@ MinIO console is available at http://localhost:9001.
 {user_handle}/user/images/{character}/{filename}
 {user_handle}/backgrounds/{filename}
 {user_handle}/User Avatars/{filename}
+{user_handle}/groups/{group_id}.json
 ```
 
 ## Limitations
@@ -257,11 +265,17 @@ SillyTavern-vault covers the primary storage paths (1:1 chats, images, avatars, 
 |---------|--------|--------|
 | 1:1 chats | Stored in PostgreSQL | Full support |
 | Group chats | Stored in PostgreSQL | Full support |
-| Images / media | Stored in S3 | Full support |
+| Group definitions | Stored in S3 | Full support |
 | Chat search | PostgreSQL full-text (GIN) | Full support |
+| Character rename | Updates DB + S3 | Full support |
+| Character delete | Deletes chats from DB | Full support |
+| Chat integrity check | Provider fallback | Full support |
+| Images / media | Stored in S3 | Full support |
+| Avatars / thumbnails | Stored in S3 | Full support |
+| Backgrounds | Stored in S3 | Full support |
 | Vector/RAG embeddings | Uses own storage (vectra) | Full support (not affected) |
 | Data Bank attachments | Fetched via API | Full support (not affected) |
-| Group metadata | Stored on filesystem | Small config files (~500B), not an issue |
+| Image metadata | Cached on filesystem | Regeneratable cache, not critical data |
 | Character stats | Reads filesystem directly | Stats may show empty |
 | Data Maid (cleanup) | Scans filesystem | Won't detect externally stored data |
 
