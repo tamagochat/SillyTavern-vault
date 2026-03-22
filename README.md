@@ -75,7 +75,19 @@ The image from the conversation is stored in S3 (viewed via MinIO console):
 
 ## Quick start
 
-### 1. Install the plugin
+### 0. Use Claude Code (recommended)
+
+The fastest way to get started — clone the repo and run the setup skill:
+
+```bash
+git clone https://github.com/tamagochat/SillyTavern-vault.git
+cd SillyTavern-vault
+claude /setup
+```
+
+This clones SillyTavern, installs dependencies, symlinks the plugin, starts Docker (Postgres + MinIO), and launches the server. You're done.
+
+### 1. Install the plugin (manual)
 
 > **Note:** This plugin requires the [tamagochat/SillyTavern](https://github.com/tamagochat/SillyTavern) fork, which adds the storage provider registry hooks. When no provider is registered, behavior is identical to upstream.
 
